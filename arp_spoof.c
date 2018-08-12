@@ -32,8 +32,8 @@ struct addr_list{
 struct addr_list list;
 
 void usage(){
-	printf("syntax: send_arp <interface> <sender ip> <target ip>\n");
-	printf("sample: send_arp wlan0 192.168.10.2 192.168.10.1\n");
+	printf("syntax: arp_spoof <interface> <sender ip> <target ip>\n");
+	printf("sample: arp_spoof wlan0 192.168.10.2 192.168.10.1\n");
 }
 
 void get_ip_mac(struct addr *addr,const char* dev){
